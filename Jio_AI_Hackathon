@@ -1,0 +1,255 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Apr 18 15:02:34 2018
+
+@author: Anumula_Anudeep
+"""
+## importing the required libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+# importing the require classifier algos
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import BaggingClassifier, AdaBoostClassifier,RandomForestClassifier,GradientBoostingClassifier
+from sklearn.neighbors import KNeighborsClassifier
+
+from sklearn.model_selection import train_test_split
+from sklearn.externals import joblib
+
+#imprting GridSearchCV for cross validation 
+from sklearn.grid_search import GridSearchCV
+import os
+
+
+## definition of various custom functions
+def get_remaining_target(row):
+    if row['target_score'] == -1.:
+        return -1
+    else:
+        return row['target_score'] - row['innings_score']
+
+def get_required_rr(row):
+    if row['remaining_target'] == -1:
+        return -1.
+    elif row['over'] == 20:
+        return 99
+    else:
+        return row['remaining_target'] / (20-row['over']) 
+
+def get_rr_diff(row):
+    if row['inning'] == 1:
+        return -1
+    else:
+        return row['run_rate'] - row['required_run_rate']
+
+def pre_process(df):
+
+    # innings score and wickets #
+    df['innings_wickets'] = df.groupby(['match_id', 'inning'])['player_dismissed'].cumsum()
+    df['innings_score'] = df.groupby(['match_id', 'inning'])['total_runs'].cumsum()
+
+    # Get the target column #
+    temp_df = df.groupby(['match_id', 'inning'])['total_runs'].sum().reset_index()
+    temp_df = temp_df.loc[temp_df['inning']==1,:]
+    temp_df['inning'] = 2
+    temp_df.columns = ['match_id', 'inning', 'target_score']
+    
+    df = df.merge(temp_df, how='left', on = ['match_id', 'inning'])
+    df['target_score'].fillna(-1, inplace=True)
+    
+    # get the remaining target #
+    df['remaining_target'] = df.apply(lambda row: get_remaining_target(row),axis=1)
+    
+    # get the run rate #
+    df['run_rate'] = df['innings_score'] / df['over']
+
+    # get the remaining run rate #
+    df['required_run_rate'] = df.apply(lambda row: get_required_rr(row), axis=1)
+
+    df['runrate_diff'] = df.apply(lambda row: get_rr_diff(row), axis=1)
+    df['is_batting_team'] = (df['team1'] == df['batting_team']).astype('int')
+   
+    return df
+
+
+
+## Step 01: pre-processing
+os.chdir(r"D:\techGig\IPLWinPredection\20April18")
+train_score_df = pd.read_csv("./input data/TrainDeliveries.csv")
+train_match_df = pd.read_csv("./input data/Trainmatches.csv")
+
+train_score_match_df = pd.merge(train_score_df, train_match_df[['id','season', 'winner', 'result', 'dl_applied', 'team1', 'team2']], left_on='match_id', right_on='id')
+
+train_score_match_df.player_dismissed.fillna(0, inplace=True)
+train_score_match_df['player_dismissed'].loc[train_score_match_df['player_dismissed'] != 0] = 1
+train_df = train_score_match_df.groupby(['match_id', 'inning', 'over', 'team1', 'team2', 'batting_team', 'winner'])[['total_runs', 'player_dismissed']].agg(['sum']).reset_index()
+train_df.columns = train_df.columns.get_level_values(0)
+
+train_dframe = pre_process(train_df)
+
+
+# Step 02: modelling
+# crearating class/target variable
+train_dframe['team_1_win_flag'] = (train_dframe['team1'] == train_dframe['winner']).astype('int')
+
+x_cols = ['inning', 'over', 'total_runs', 'player_dismissed', 'innings_wickets', 'innings_score', 'target_score', 'remaining_target', 'run_rate', 'required_run_rate', 'runrate_diff', 'is_batting_team']
+
+# create the input and target variables #
+X = np.array(train_dframe[x_cols[:]])
+Y = np.array(train_dframe['team_1_win_flag'])
+
+#doing a stratified sample on Y i.e target
+X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.3, random_state=0,  stratify=Y)
+
+
+## modeling
+
+
+
+param_grid = {
+    'criterion' :['entropy','gini'],
+    'max_features': ['auto', 'sqrt', 'log2'],
+    'max_depth':[5,8,12,15],
+    'min_samples_leaf':[5,20,50]
+    
+}
+
+### grid search for cart model
+cart = DecisionTreeClassifier(random_state=5151)
+CV_cart = GridSearchCV(estimator=cart, param_grid=param_grid, cv= 5)
+CV_cart.fit(X_train,Y_train)
+print (CV_cart.best_params_)
+CV_cart.score(X_test, Y_test)  
+
+### grid search for Random forest model
+param_grid = {
+    'criterion' :['entropy','gini'],
+    'max_features': ['auto', 'sqrt', 'log2'],
+    'max_depth':[5,8,12,15],
+    'min_samples_leaf':[5,20,50]
+    
+}
+
+rforest = RandomForestClassifier(n_jobs=-1,random_state=5151,warm_start=True)
+
+CV_rforest = GridSearchCV(estimator=rforest, param_grid=param_grid, cv= 5)
+CV_rforest.fit(X_train,Y_train)
+print (CV_rforest.best_params_)
+CV_rforest.score(X_test, Y_test) 
+
+
+### grid search for Gradientboost model
+param_grid = {
+    'max_features': ['auto', 'sqrt', 'log2'],
+    'max_depth':[5,8,12,15],
+    'min_samples_leaf':[5,8,12,15]
+    
+}
+gboost = GradientBoostingClassifier(warm_start=True,random_state=5151)
+CV_gboost = GridSearchCV(estimator=gboost, param_grid=param_grid, cv= 5)
+CV_gboost.fit(X_train,Y_train)
+print (CV_gboost.best_params_)
+CV_gboost.score(X_test, Y_test)
+
+
+### grid search for KNN classifier model
+param_grid = {
+    'n_neighbors': [3,5,8,9,10,12]  
+}
+KNN= KNeighborsClassifier( n_jobs=-1)
+CV_KNN = GridSearchCV(estimator=KNN, param_grid=param_grid, cv= 5)
+CV_KNN.fit(X_train,Y_train)
+print (CV_KNN.best_params_)
+CV_KNN.score(X_test, Y_test) 
+
+### grid search for adaboost model
+param_grid = {
+    'learning_rate': [0.1,0.2,0.3,0.4,0.5]
+}
+
+adaboost = AdaBoostClassifier()
+CV_adaoost = GridSearchCV(estimator=adaboost, param_grid=param_grid, cv= 5)
+CV_adaoost.fit(X_train,Y_train)
+print (CV_adaoost.best_params_)
+CV_adaoost.score(X_test, Y_test) 
+
+### grid search for Bagging classifier model
+param_grid = {
+    'n_estimators': [10,20,30,40,50,60,70,80],
+    'max_samples':[5,10,15,20]
+}
+
+Bagg = BaggingClassifier(warm_start=True,random_state=5151)
+CV_Bagg = GridSearchCV(estimator=Bagg, param_grid=param_grid, cv= 5)
+CV_Bagg.fit(X_train,Y_train)
+print (CV_Bagg.best_params_)
+CV_Bagg.score(X_test, Y_test) 
+
+
+## plotting ROC curve, precession, F1scores
+def roc_auc_plot(y_true, y_proba, y_pred,label=' ', l='-', lw=1.0):
+    from sklearn.metrics import roc_curve, roc_auc_score, precision_score, f1_score
+    fpr, tpr, _ = roc_curve(y_true, y_proba[:,1])
+    ax.plot(fpr, tpr, linestyle=l, linewidth=lw,
+            label="%s (area=%.3f, prec=%.3f, F1=%.3f)"%(label,roc_auc_score(y_true, y_proba[:,1]), 
+                       precision_score(y_true,y_pred), f1_score(y_true,y_pred) ))
+
+f, ax = plt.subplots(figsize=(6,6))
+
+roc_auc_plot(Y_test, CV_cart.predict_proba(X_test), CV_cart.predict(X_test), label='CART', l='-')
+roc_auc_plot(Y_test, CV_rforest.predict_proba(X_test),CV_rforest.predict(X_test), label='RFOREST', l='--')
+roc_auc_plot(Y_test, CV_gboost.predict_proba(X_test),CV_gboost.predict(X_test), label='GBOOST', l='-.')
+roc_auc_plot(Y_test, CV_adaoost.predict_proba(X_test),CV_adaoost.predict(X_test), label='ADABOOST', l=':')
+roc_auc_plot(Y_test, CV_KNN.predict_proba(X_test),CV_KNN.predict(X_test), label='KNN', l='-')
+roc_auc_plot(Y_test, CV_Bagg.predict_proba(X_test),CV_Bagg.predict(X_test), label='BAGG', l='--')
+
+
+ax.plot([0,1], [0,1], color='k', linewidth=0.5, linestyle='--', label='Random Classifier')    
+ax.legend(loc="lower right")    
+ax.set_xlabel('False Positive Rate')
+ax.set_ylabel('True Positive Rate')
+ax.set_xlim([0, 1])
+ax.set_ylim([0, 1])
+ax.set_title('Receiver Operator Characteristic[ROC] curves')
+
+
+
+## from the graph plotted we found that Grdient boositing has higher AUC,precession and F1 values
+## and hence selected GBM as our model fot this data
+CV_gboost.fit(X_train,Y_train)
+GBM = GradientBoostingClassifier(warm_start=True,random_state=5151, max_depth= 5, 
+                                 max_features= 'auto', min_samples_leaf= 5)
+
+GBM.fit(X_train,Y_train)
+#GBM.score(X_test, Y_test)
+
+## Step 03: predicting
+#joblib.dump(GBM, "GBM_model.pkl")
+
+test_match_df = pd.read_csv("./input data/Testmatches.csv")
+test_score_df = pd.read_csv("./input data/TestDeliveries.csv")
+
+test_score_match_df = pd.merge(test_score_df, test_match_df[['match_id','season', 'result', 'dl_applied', 'team1', 'team2']], left_on='match_id', right_on='match_id')
+
+test_score_match_df.player_dismissed.fillna(0, inplace=True)
+test_score_match_df['player_dismissed'].loc[test_score_match_df['player_dismissed'] != 0] = 1
+test_df = test_score_match_df.groupby(['match_id', 'inning', 'over', 'team1', 'team2', 'batting_team'])[['total_runs', 'player_dismissed']].agg(['sum']).reset_index()
+test_df.columns = test_df.columns.get_level_values(0)
+test_df = pre_process(test_df)
+test_df['team_1_win_flag'] = 0
+
+
+# create the input and target variables #
+X = np.array(test_df[x_cols[:]])
+test_df['team_1_win_flag'] = GBM.predict(X)
+"""
+Here we get the match prediction for every row, but the competition requires
+only the final winner. hence grouping by match_id to get the winner after last over of the match
+"""
+final = test_df.groupby(['match_id']).last().reset_index()
+
+req_col=['match_id', 'team_1_win_flag']
+final = final[req_col]
+
+file_name ='submission_draft.csv'
+final.to_csv(file_name, sep=',', encoding='utf-8', index=False)
